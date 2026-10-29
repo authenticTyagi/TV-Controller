@@ -1,0 +1,7 @@
+node_modules/
+data.json
+*.apk
+build/
+.gradle/
+local.properties
+.idea/

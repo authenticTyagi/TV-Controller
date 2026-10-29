@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TV Watch</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1c1f24; --muted:#6b7280; --accent:#2563eb; --bar:#93b4f5; --line:#e5e7eb; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111418; --card:#1a1e24; --text:#e8eaed; --muted:#9aa0a6; --accent:#6b9bff; --bar:#3b5ea8; --line:#2a2f37; } }
+  * { box-sizing: border-box; }
+  [hidden] { display:none !important; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--text); font:16px/1.4 system-ui,sans-serif; }
+  main { max-width:640px; margin:0 auto; display:grid; gap:12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  h2 { margin:0 0 8px; font-size:14px; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  input,textarea,button,select { font:inherit; padding:10px; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--text); width:100%; }
+  button { background:var(--accent); color:#fff; border:0; cursor:pointer; margin-top:8px; }
+  button.secondary { background:var(--bg); color:var(--text); border:1px solid var(--line); }
+  .row { display:flex; gap:8px; align-items:center; } .row > * { flex:1; }
+  .dot { width:10px; height:10px; border-radius:50%; background:#9ca3af; display:inline-block; margin-right:6px; }
+  .dot.on { background:#16a34a; }
+  .bar { display:grid; grid-template-columns:110px 1fr 56px; gap:8px; align-items:center; margin:6px 0; font-size:14px; }
+  .bar div.fill { height:14px; background:var(--bar); border-radius:4px; }
+  .muted { color:var(--muted); font-size:14px; }
+  #cam { width:100%; border-radius:8px; background:#000; display:none; }
+  #login { display:grid; gap:8px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card" id="login">
+    <h2>Sign in</h2>
+    <input id="pw" type="password" placeholder="Password" autocomplete="current-password">
+    <button id="go">Open</button>
+  </div>
+
+  <div id="app" hidden style="display:grid;gap:12px">
+    <div class="card">
+      <h2>Right now</h2>
+      <div><span class="dot" id="dot"></span><span id="now">Connecting…</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Screen time <select id="range" style="width:auto;float:right;padding:4px"><option value="1">Today</option><option value="7">7 days</option></select></h2>
+      <div id="total" style="font-size:28px;font-weight:600"></div>
+      <div id="bars"></div>
+    </div>
+
+    <div class="card">
+      <h2>Send to TV</h2>
+      <textarea id="text" rows="2" placeholder="Message to show on the TV"></textarea>
+      <div class="row" style="margin-top:8px">
+        <input id="img" type="file" accept="image/*">
+        <select id="secs"><option value="10">10 s</option><option value="20" selected>20 s</option><option value="60">60 s</option></select>
+      </div>
+      <button id="send">Show on TV</button>
+      <div class="muted" id="sendres"></div>
+    </div>
+
+    <div class="card">
+      <h2>Daily limit</h2>
+      <div class="row"><input id="limit" type="number" min="0" placeholder="Minutes (0 = none)"><button id="setlimit" style="margin-top:0">Save</button></div>
+    </div>
+
+    <div class="card">
+      <h2>Live camera</h2>
+      <img id="cam" alt="Live camera">
+      <div class="muted" id="camstat">Off</div>
+      <button id="camtoggle" class="secondary">Start camera</button>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let pw = sessionStorage.getItem('pw') || '', ws, camOn = false;
+
+const api = async (path, body) => {
+  const r = await fetch('/api/' + path, {
+    method: body ? 'POST' : 'GET',
+    headers: { 'x-password': pw, 'content-type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (r.status === 401) { sessionStorage.removeItem('pw'); location.reload(); }
+  return r.json();
+};
+
+const fmt = (ms) => { const m = Math.round(ms / 60000); return m >= 60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m}m`; };
+
+function showStatus(s) {
+  $('dot').className = 'dot' + (s.tvOnline ? ' on' : '');
+  $('now').textContent = !s.tvOnline ? 'TV offline / app not running'
+    : s.now ? `${s.now.label} · since ${new Date(s.now.since).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`
+    : 'TV on home screen or in standby';
+}
+
+async function loadUsage() {
+  const sessions = await api('usage?days=' + $('range').value);
+  const by = {}; let total = 0;
+  sessions.forEach((s) => { const d = s.end - s.start; by[s.label] = (by[s.label] || 0) + d; total += d; });
+  $('total').textContent = fmt(total);
+  const rows = Object.entries(by).sort((a, b) => b[1] - a[1]);
+  const max = rows.length ? rows[0][1] : 1;
+  $('bars').innerHTML = rows.map(([k, v]) =>
+    `<div class="bar"><span>${k.replace(/[<>&]/g, '')}</span><div class="fill" style="width:${v/max*100}%"></div><span>${fmt(v)}</span></div>`).join('')
+    || '<div class="muted">No viewing recorded.</div>';
+}
+
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/viewer?password=' + encodeURIComponent(pw));
+  ws.binaryType = 'blob';
+  ws.onmessage = (e) => {
+    if (typeof e.data !== 'string') {
+      const old = $('cam').src; $('cam').src = URL.createObjectURL(e.data); if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+      $('cam').style.display = 'block'; $('camstat').textContent = 'Live'; return;
+    }
+    const m = JSON.parse(e.data);
+    if (m.type === 'status') { showStatus(m); loadUsage(); }
+    if (m.type === 'camera-status' && !m.ok) { camOn = false; $('camtoggle').textContent = 'Start camera'; $('camstat').textContent = 'TV could not open the camera: ' + (m.error || 'unknown'); }
+  };
+  ws.onclose = () => setTimeout(connect, 3000);
+}
+
+async function start() {
+  $('login').hidden = true; $('app').hidden = false;
+  const s = await api('status'); showStatus(s); $('limit').value = s.limitMinutes;
+  camOn = s.cameraOn; $('camtoggle').textContent = camOn ? 'Stop camera' : 'Start camera';
+  loadUsage(); connect(); setInterval(loadUsage, 60000);
+}
+
+$('go').onclick = () => { pw = $('pw').value; sessionStorage.setItem('pw', pw); start(); };
+$('range').onchange = loadUsage;
+$('setlimit').onclick = () => api('limit', { minutes: $('limit').value || 0 });
+$('camtoggle').onclick = async () => {
+  camOn = !camOn; await api('camera', { on: camOn });
+  $('camtoggle').textContent = camOn ? 'Stop camera' : 'Start camera';
+  if (!camOn) { $('cam').style.display = 'none'; $('camstat').textContent = 'Off'; } else $('camstat').textContent = 'Starting…';
+};
+
+// Downscale pictures in the browser so the TV gets a small JPEG.
+const shrink = (file) => new Promise((res) => {
+  const img = new Image(); img.onload = () => {
+    const k = Math.min(1, 1280 / Math.max(img.width, img.height));
+    const c = document.createElement('canvas'); c.width = img.width * k; c.height = img.height * k;
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); res(c.toDataURL('image/jpeg', 0.8).split(',')[1]);
+  }; img.src = URL.createObjectURL(file);
+});
+$('send').onclick = async () => {
+  const f = $('img').files[0];
+  const r = await api('message', { text: $('text').value, image: f ? await shrink(f) : null, seconds: +$('secs').value });
+  $('sendres').textContent = r.delivered ? 'Shown on TV.' : r.error === 'empty' ? 'Add text or a picture.' : 'TV is offline.';
+  if (r.delivered) { $('text').value = ''; $('img').value = ''; }
+};
+
+if (pw) start();
+</script>
+</body>
+</html>
